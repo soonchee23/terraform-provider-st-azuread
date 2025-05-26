@@ -2,11 +2,14 @@ package azuread
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	graph "github.com/microsoftgraph/msgraph-sdk-go"
-	graphgroups "github.com/microsoftgraph/msgraph-sdk-go/groups"
+	graphGroups "github.com/microsoftgraph/msgraph-sdk-go/groups"
+	"github.com/microsoftgraph/msgraph-sdk-go/models"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -27,13 +30,13 @@ type groupsDataSource struct {
 }
 
 type groupsDataSourceModel struct {
-	DisplayNames      []types.String `tfsdk:"display_names"`
-	DisplayNamePrefix types.String   `tfsdk:"display_name_prefix"`
-	IgnoreMissing     types.Bool     `tfsdk:"ignore_missing"`
-	ReturnAll         types.Bool     `tfsdk:"return_all"`
-	MailEnabled       types.Bool     `tfsdk:"mail_enabled"`
-	SecurityEnabled   types.Bool     `tfsdk:"security_enabled"`
-	Groups            []groupModel   `tfsdk:"groups"`
+	DisplayNames      types.List    `tfsdk:"display_names"`
+	DisplayNamePrefix types.String  `tfsdk:"display_name_prefix"`
+	IgnoreMissing     types.Bool    `tfsdk:"ignore_missing"`
+	ReturnAll         types.Bool    `tfsdk:"return_all"`
+	MailEnabled       types.Bool    `tfsdk:"mail_enabled"`
+	SecurityEnabled   types.Bool    `tfsdk:"security_enabled"`
+	Groups            []*groupModel `tfsdk:"groups"`
 }
 
 type groupModel struct {
@@ -52,7 +55,6 @@ func (d *groupsDataSource) Schema(_ context.Context, req datasource.SchemaReques
 			"display_names": schema.ListAttribute{
 				ElementType: types.StringType,
 				Optional:    true,
-				Computed:    true,
 				Description: "The display names of the groups. Cannot be used with display_name_prefix or return_all during apply, but will be set automatically after querying the groups.",
 			},
 			"display_name_prefix": schema.StringAttribute{
@@ -70,12 +72,10 @@ func (d *groupsDataSource) Schema(_ context.Context, req datasource.SchemaReques
 			},
 			"mail_enabled": schema.BoolAttribute{
 				Optional:    true,
-				Computed:    true,
 				Description: "Whether the groups are mail-enabled.",
 			},
 			"security_enabled": schema.BoolAttribute{
 				Optional:    true,
-				Computed:    true,
 				Description: "Whether the groups are security-enabled.",
 			},
 			"groups": schema.ListNestedAttribute{
@@ -113,34 +113,24 @@ func (d *groupsDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		return
 	}
 
-	hasDisplayNames := plan.DisplayNames != nil && len(plan.DisplayNames) > 0
-	hasPrefix := !plan.DisplayNamePrefix.IsNull() && plan.DisplayNamePrefix.ValueString() != ""
-	returnAll := !plan.ReturnAll.IsNull() && plan.ReturnAll.ValueBool()
-	ignoreMissing := !plan.IgnoreMissing.IsNull() && plan.IgnoreMissing.ValueBool()
+	hasDisplayNames := !(plan.DisplayNames.IsNull() || plan.DisplayNames.IsUnknown()) && len(plan.DisplayNames.Elements()) > 0
+	hasPrefix := !(plan.DisplayNamePrefix.IsNull() || plan.DisplayNamePrefix.IsUnknown()) && plan.DisplayNamePrefix.ValueString() != ""
+	returnAll := plan.ReturnAll.ValueBool()
+	ignoreMissing := plan.IgnoreMissing.ValueBool()
 
 	// Start validation.
 	// Enforce that only one of `display_names`, `display_name_prefix`, or `return_all` is set during apply.
-	setCount := 0
-	if hasDisplayNames {
-		setCount++
-	}
-	if hasPrefix {
-		setCount++
-	}
-	if returnAll {
-		setCount++
-	}
-	if setCount > 1 {
+	if !exactlyOneSet(hasDisplayNames, hasPrefix, returnAll) {
 		resp.Diagnostics.AddError(
-			"Invalid Configuration",
+			"[INPUT ERROR] Invalid Input",
 			"Only one of `display_names`, `display_name_prefix`, or `return_all` can be set at a time.",
 		)
 		return
 	}
-	// Ensure that only one of return_all or ignore_missing is set to true.
+
 	if returnAll && ignoreMissing {
 		resp.Diagnostics.AddError(
-			"Invalid Configuration",
+			"[INPUT ERROR] Invalid Input",
 			"`return_all` and `ignore_missing` cannot both be true at the same time.",
 		)
 		return
@@ -165,24 +155,52 @@ func (d *groupsDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		filterStr = &filter
 	}
 
-	queryParams := &graphgroups.GroupsRequestBuilderGetQueryParameters{
+	queryParams := &graphGroups.GroupsRequestBuilderGetQueryParameters{
 		Filter: filterStr,
 		Select: []string{"id", "displayName"},
 	}
-	config := &graphgroups.GroupsRequestBuilderGetRequestConfiguration{
+
+	config := &graphGroups.GroupsRequestBuilderGetRequestConfiguration{
 		QueryParameters: queryParams,
 	}
 
-	result, err := d.client.Groups().Get(ctx, config)
+	var (
+		result models.GroupCollectionResponseable
+		err    error
+	)
+
+	maxRetries := 5
+	backoff := time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		result, err = d.client.Groups().Get(ctx, config)
+		if err == nil {
+			break
+		}
+
+		// If context was canceled, no point retrying.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			resp.Diagnostics.AddError("Graph API Error", fmt.Sprintf("Request canceled or timed out: %s", err.Error()))
+			return
+		}
+
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+
 	if err != nil {
-		resp.Diagnostics.AddError("Graph API Error", fmt.Sprintf("Failed to fetch groups: %s", err.Error()))
+		resp.Diagnostics.AddError("Graph API Error", fmt.Sprintf("Failed after retries: %s", err.Error()))
 		return
 	}
 
-	var groups []groupModel
+	var groups []*groupModel
 	inputNames := make(map[string]struct{})
-	for _, dn := range plan.DisplayNames {
-		if !dn.IsNull() && dn.ValueString() != "" {
+	if hasDisplayNames {
+		for _, dnAttr := range plan.DisplayNames.Elements() {
+			dn, ok := dnAttr.(types.String)
+			if !ok || dn.IsNull() || dn.ValueString() == "" {
+				continue
+			}
 			inputNames[dn.ValueString()] = struct{}{}
 		}
 	}
@@ -190,17 +208,13 @@ func (d *groupsDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 	for _, group := range result.GetValue() {
 		name := group.GetDisplayName()
 		id := group.GetId()
-		if name == nil || id == nil {
-			continue
-		}
-
 		if returnAll || hasPrefix {
-			groups = append(groups, groupModel{
+			groups = append(groups, &groupModel{
 				DisplayName: types.StringValue(*name),
 				ID:          types.StringValue(*id),
 			})
 		} else if _, ok := inputNames[*name]; ok {
-			groups = append(groups, groupModel{
+			groups = append(groups, &groupModel{
 				DisplayName: types.StringValue(*name),
 				ID:          types.StringValue(*id),
 			})
@@ -216,7 +230,7 @@ func (d *groupsDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		return
 	}
 
-	// Handle missing groups.
+	// Handle missing groups, when ignore_missing is set to false.
 	if len(inputNames) > 0 && !ignoreMissing {
 		missing := make([]string, 0, len(inputNames))
 		for name := range inputNames {
@@ -226,37 +240,17 @@ func (d *groupsDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		return
 	}
 
-	// Set DisplayNames from result if not provided.
-	if !hasDisplayNames {
-		var displayNameValues []types.String
-		for _, group := range result.GetValue() {
-			name := group.GetDisplayName()
-			if name != nil {
-				displayNameValues = append(displayNameValues, types.StringValue(*name))
-			}
-		}
-		plan.DisplayNames = displayNameValues
-	}
-
-	// Set default values when is not set.
-	if plan.DisplayNamePrefix.IsNull() {
-		plan.DisplayNamePrefix = types.StringValue("")
-	}
-	if plan.IgnoreMissing.IsNull() {
-		plan.IgnoreMissing = types.BoolValue(false)
-	}
-	if plan.MailEnabled.IsNull() {
-		plan.MailEnabled = types.BoolValue(false)
-	}
-	if plan.ReturnAll.IsNull() {
-		plan.ReturnAll = types.BoolValue(false)
-	}
-	if plan.SecurityEnabled.IsNull() {
-		plan.SecurityEnabled = types.BoolValue(false)
-	}
-
 	plan.Groups = groups
-
 	diags = resp.State.Set(ctx, &plan)
 	resp.Diagnostics.Append(diags...)
+}
+
+func exactlyOneSet(flags ...bool) bool {
+	count := 0
+	for _, flag := range flags {
+		if flag {
+			count++
+		}
+	}
+	return count == 1
 }

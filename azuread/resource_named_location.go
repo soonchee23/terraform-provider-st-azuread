@@ -3,22 +3,32 @@ package azuread
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff"
+	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/errors"
 
-	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
+	graph "github.com/microsoftgraph/msgraph-sdk-go"
 	graphmodels "github.com/microsoftgraph/msgraph-sdk-go/models"
+)
+
+const (
+	IPOdataType      = "#microsoft.graph.ipNamedLocation"
+	CountryOdataType = "#microsoft.graph.countryNamedLocation"
+	IPV4Type         = "#microsoft.graph.iPv4CidrRange"
+	IPV6Type         = "#microsoft.graph.iPv6CidrRange"
+	IDPath           = "/identity/conditionalAccess/namedLocations/"
 )
 
 var (
@@ -31,7 +41,7 @@ func NewNamedLocationResource() resource.Resource {
 }
 
 type namedLocationResource struct {
-	client *msgraphsdk.GraphServiceClient
+	client *graph.GraphServiceClient
 }
 
 type namedLocationResourceModel struct {
@@ -61,13 +71,13 @@ func (r *namedLocationResource) Schema(_ context.Context, _ resource.SchemaReque
 	resp.Schema = schema.Schema{
 		Description: "Manages a Named Location within Azure Active Directory.",
 		Attributes: map[string]schema.Attribute{
-			"id": schema.StringAttribute{
-				Computed:    true,
-				Description: "The ID for the named location.",
-			},
 			"display_name": schema.StringAttribute{
 				Required:    true,
 				Description: "The display name for the named location.",
+			},
+			"id": schema.StringAttribute{
+				Computed:    true,
+				Description: "The ID for the named location.",
 			},
 		},
 		Blocks: map[string]schema.Block{
@@ -96,6 +106,25 @@ func (r *namedLocationResource) Schema(_ context.Context, _ resource.SchemaReque
 						ElementType: types.StringType,
 						Optional:    true,
 						Description: "List of countries and/or regions in two-letter format specified by ISO 3166-2.",
+						Validators: []validator.List{
+							listvalidator.ValueStringsAre(stringvalidator.OneOf("ZW", "ZM", "YE", "EH", "WF", "VI", "VG", "VN", "VE", "VU", "UZ", "UM", "UY", "US", "GB",
+								"AE", "UA", "UG", "TV", "TC", "TM", "TR", "TN", "TT", "TO", "TK", "TG", "TL", "TH", "TZ",
+								"TJ", "TW", "SY", "CH", "SE", "SJ", "SR", "SD", "LK", "ES", "SS", "GS", "ZA", "SO", "SB",
+								"SI", "SK", "SX", "SG", "SL", "SC", "RS", "SN", "SA", "ST", "SM", "WS", "VC", "PM", "MF",
+								"LC", "KN", "SH", "BL", "RW", "RU", "RO", "RE", "CG", "QA", "PR", "PT", "PL", "PN", "PH",
+								"PE", "PY", "PG", "PA", "PS", "PW", "PK", "OM", "NO", "MP", "MK", "KP", "NF", "NU", "NG",
+								"NE", "NI", "NZ", "NC", "NL", "NP", "NR", "NA", "MM", "MZ", "MA", "MS", "ME", "MN", "MC",
+								"MD", "FM", "MX", "YT", "MU", "MR", "MQ", "MH", "MT", "ML", "MV", "MY", "MW", "MG", "MO",
+								"LU", "LT", "LI", "LY", "LR", "LS", "LB", "LV", "LA", "KG", "KW", "XK", "KR", "KI", "KE",
+								"KZ", "JO", "JE", "JP", "JM", "IT", "IL", "IM", "IE", "IQ", "IR", "ID", "IN", "IS", "HU",
+								"HK", "HN", "VA", "HM", "HT", "GY", "GW", "GN", "GG", "GT", "GU", "GP", "GD", "GL", "GR",
+								"GI", "GH", "DE", "GE", "GM", "GA", "TF", "PF", "GF", "FR", "FI", "FJ", "FO", "FK", "ET",
+								"SZ", "EE", "ER", "GQ", "SV", "EG", "EC", "DO", "DM", "DJ", "DK", "CD", "CZ", "CY", "CW",
+								"CU", "HR", "CI", "CR", "CK", "KM", "CO", "CC", "CX", "CN", "CL", "TD", "CF", "KY", "CA",
+								"CM", "KH", "CV", "BI", "BF", "BG", "BN", "IO", "BR", "BV", "BW", "BA", "BQ", "BO", "BT",
+								"BM", "BJ", "BZ", "BE", "BY", "BB", "BD", "BH", "BS", "AZ", "AT", "AU", "AW", "AM", "AR",
+								"AG", "AQ", "AI", "AO", "AD", "AS", "DZ", "AL", "AX", "AF")),
+						},
 					},
 					"include_unknown_countries_and_regions": schema.BoolAttribute{
 						Optional:    true,
@@ -104,6 +133,9 @@ func (r *namedLocationResource) Schema(_ context.Context, _ resource.SchemaReque
 					"country_lookup_method": schema.StringAttribute{
 						Optional:    true,
 						Description: "Method of detecting country the user is located in. Possible values are 'clientIpAddress' for IP-based location and 'authenticatorAppGps' for Authenticator app GPS-based location. Defaults to 'clientIpAddress'.",
+						Validators: []validator.String{
+							stringvalidator.OneOf("clientIpAddress", "authenticatorAppGps"),
+						},
 					},
 				},
 			},
@@ -120,9 +152,8 @@ func (r *namedLocationResource) Configure(_ context.Context, req resource.Config
 }
 
 func (r *namedLocationResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.Plan.Raw.IsNull() {
-		// If the entire plan is null, the resource is planned for destruction.
-	} else {
+	// If the entire plan is null, the resource is planned for destruction.
+	if !req.Plan.Raw.IsNull() {
 		var plan namedLocationResourceModel
 		diags := req.Plan.Get(ctx, &plan)
 		resp.Diagnostics.Append(diags...)
@@ -139,7 +170,7 @@ func (r *namedLocationResource) ModifyPlan(ctx context.Context, req resource.Mod
 			if plan.IP.ForceDestroy.IsNull() || plan.IP.ForceDestroy.IsUnknown() {
 				resp.Diagnostics.AddAttributeError(
 					path.Root("ip").AtName("force_destroy"),
-					"Missing Required Attribute",
+					"[INPUT ERROR] Missing Input",
 					"When 'ip.trusted' is set to true, you must also set 'ip.force_destroy' explicitly.",
 				)
 				return
@@ -150,8 +181,8 @@ func (r *namedLocationResource) ModifyPlan(ctx context.Context, req resource.Mod
 
 func (r *namedLocationResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan namedLocationResourceModel
-	getPlanDiags := req.Plan.Get(ctx, &plan)
-	resp.Diagnostics.Append(getPlanDiags...)
+	diags := req.Config.Get(ctx, &plan)
+	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -177,17 +208,8 @@ func (r *namedLocationResource) Create(ctx context.Context, req resource.CreateR
 		}
 	}
 
-	state := namedLocationResourceModel{
-		ID:          plan.ID,
-		DisplayName: plan.DisplayName,
-		IP:          plan.IP,
-		Country:     plan.Country,
-	}
-
-	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	diags = resp.State.Set(ctx, &plan)
+	resp.Diagnostics.Append(diags...)
 }
 
 func (r *namedLocationResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -203,11 +225,29 @@ func (r *namedLocationResource) Read(ctx context.Context, req resource.ReadReque
 	parts := strings.Split(fullID, "/")
 	namedLocationId := parts[len(parts)-1]
 
-	result, err := r.client.Identity().
-		ConditionalAccess().
-		NamedLocations().
-		ByNamedLocationId(namedLocationId).
-		Get(ctx, nil)
+	var result graphmodels.NamedLocationable
+	operation := func() error {
+		var err error
+		result, err = r.client.Identity().
+			ConditionalAccess().
+			NamedLocations().
+			ByNamedLocationId(namedLocationId).
+			Get(ctx, nil)
+		if err != nil {
+			// You can add logic here to determine if the error is retryable
+			return err
+		}
+		if result == nil || result.GetOdataType() == nil {
+			return fmt.Errorf("Named location does not exist or has an invalid @odata.type.")
+		}
+		return nil
+	}
+
+	// Configure exponential backoff parameters
+	retryBackoff := backoff.NewExponentialBackOff()
+	retryBackoff.MaxElapsedTime = 30 * time.Second
+
+	err := backoff.Retry(operation, backoff.WithContext(retryBackoff, ctx))
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Microsoft Graph Error",
@@ -216,17 +256,9 @@ func (r *namedLocationResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
-	if result == nil || result.GetOdataType() == nil {
-		resp.Diagnostics.AddError(
-			"Invalid Response",
-			"Named location does not exist or has an invalid @odata.type.",
-		)
-		return
-	}
-
 	odataType := *result.GetOdataType()
 	switch odataType {
-	case "#microsoft.graph.countryNamedLocation":
+	case CountryOdataType:
 		countryNamedLocation, ok := result.(graphmodels.CountryNamedLocationable)
 		if !ok {
 			resp.Diagnostics.AddError(
@@ -272,7 +304,7 @@ func (r *namedLocationResource) Read(ctx context.Context, req resource.ReadReque
 
 		state.IP = nil
 
-	case "#microsoft.graph.ipNamedLocation":
+	case IPOdataType:
 		ipNamedLocation, ok := result.(graphmodels.IpNamedLocationable)
 		if !ok {
 			resp.Diagnostics.AddError(
@@ -381,7 +413,7 @@ func (r *namedLocationResource) Delete(ctx context.Context, req resource.DeleteR
 	parts := strings.Split(fullID, "/")
 	namedLocationID := parts[len(parts)-1]
 
-	if state.IP.Trusted.ValueBool() && !state.IP.ForceDestroy.ValueBool() {
+	if state.IP != nil && state.IP.Trusted.ValueBool() && !state.IP.ForceDestroy.ValueBool() {
 		resp.Diagnostics.AddError(
 			"Unable to delete Named Location",
 			fmt.Sprintf(
@@ -427,21 +459,20 @@ func (r *namedLocationResource) Delete(ctx context.Context, req resource.DeleteR
 			if ip.To4() != nil {
 				ipv4Range := graphmodels.NewIPv4CidrRange()
 				ipv4Range.SetCidrAddress(&cidr)
-				ipv4Type := "#microsoft.graph.iPv4CidrRange"
+				ipv4Type := IPV4Type
 				ipv4Range.SetOdataType(&ipv4Type)
 				ipRanges = append(ipRanges, ipv4Range)
 			} else {
 				ipv6Range := graphmodels.NewIPv6CidrRange()
 				ipv6Range.SetCidrAddress(&cidr)
-				ipv6Type := "#microsoft.graph.iPv6CidrRange"
+				ipv6Type := IPV6Type
 				ipv6Range.SetOdataType(&ipv6Type)
 				ipRanges = append(ipRanges, ipv6Range)
 			}
 		}
 
-		log.Printf("Updating named location with CIDRs: %v", ipRanges)
 		updateIpNamedLocationRequest.SetIpRanges(ipRanges)
-		odataType := "#microsoft.graph.ipNamedLocation"
+		odataType := IPOdataType
 		updateIpNamedLocationRequest.SetOdataType(&odataType)
 
 		// Backoff retry for the PATCH request.
@@ -458,7 +489,6 @@ func (r *namedLocationResource) Delete(ctx context.Context, req resource.DeleteR
 				break
 			}
 
-			log.Printf("Patch attempt %d failed: %s. Retrying in %s...", i+1, patchErr.Error(), backoff)
 			time.Sleep(backoff)
 			backoff *= 2
 		}
@@ -487,17 +517,17 @@ func (r *namedLocationResource) Delete(ctx context.Context, req resource.DeleteR
 		)
 		return
 	}
+
+	time.Sleep(1 * time.Minute)
 }
 
 func (d *namedLocationResource) createIPNamedLocation(plan *namedLocationResourceModel) error {
 	createIPNamedLocationRequest := graphmodels.NewIpNamedLocation()
-	odataType := "#microsoft.graph.ipNamedLocation"
+	odataType := IPOdataType
 	createIPNamedLocationRequest.SetOdataType(&odataType)
 	createIPNamedLocationRequest.SetDisplayName(plan.DisplayName.ValueStringPointer())
-
 	if plan.IP.Trusted.IsNull() || plan.IP.Trusted.IsUnknown() {
-		trusted := false
-		createIPNamedLocationRequest.SetIsTrusted(&trusted)
+		return fmt.Errorf("The field 'Trusted' must be set and cannot be null or unknown.")
 	} else {
 		createIPNamedLocationRequest.SetIsTrusted(plan.IP.Trusted.ValueBoolPointer())
 	}
@@ -521,7 +551,7 @@ func (d *namedLocationResource) createIPNamedLocation(plan *namedLocationResourc
 			ipv4Range := graphmodels.NewIPv4CidrRange()
 			ipv4Range.SetCidrAddress(&cidr)
 
-			ipv4Type := "#microsoft.graph.iPv4CidrRange"
+			ipv4Type := IPV4Type
 			ipv4Range.SetOdataType(&ipv4Type)
 
 			ipRanges = append(ipRanges, ipv4Range)
@@ -529,7 +559,7 @@ func (d *namedLocationResource) createIPNamedLocation(plan *namedLocationResourc
 			ipv6Range := graphmodels.NewIPv6CidrRange()
 			ipv6Range.SetCidrAddress(&cidr)
 
-			ipv6Type := "#microsoft.graph.iPv6CidrRange"
+			ipv6Type := IPV6Type
 			ipv6Range.SetOdataType(&ipv6Type)
 
 			ipRanges = append(ipRanges, ipv6Range)
@@ -539,28 +569,11 @@ func (d *namedLocationResource) createIPNamedLocation(plan *namedLocationResourc
 	createIPNamedLocationRequest.SetIpRanges(ipRanges)
 
 	createIPNamedLocation := func() error {
-		// Check if a named location with the same DisplayName already exists.
-		existingLocations, err := d.client.Identity().
-			ConditionalAccess().
-			NamedLocations().
-			Get(context.TODO(), nil)
-		if err != nil {
-			return err
-		}
-
-		for _, location := range existingLocations.GetValue() {
-			if location.GetDisplayName() != nil && *location.GetDisplayName() == *plan.DisplayName.ValueStringPointer() {
-				plan.ID = types.StringValue("/identity/conditionalAccess/namedLocations/" + *location.GetId())
-				return nil
-			}
-		}
-
-		// If not found, create a new named location.
-		createdNamedLocation, err := d.client.Identity().
+		created, err := d.client.Identity().
 			ConditionalAccess().
 			NamedLocations().
 			Post(
-				context.TODO(),
+				context.Background(),
 				createIPNamedLocationRequest,
 				nil,
 			)
@@ -572,42 +585,60 @@ func (d *namedLocationResource) createIPNamedLocation(plan *namedLocationResourc
 					return backoff.Permanent(fmt.Errorf("failed to convert error code to int: %v", convErr))
 				}
 				if isAbleToRetry(codeInt) {
-					return err
+					return err // retryable
 				}
-				return backoff.Permanent(err)
+				return backoff.Permanent(err) // permanent
 			}
 			return err
 		}
 
-		if createdNamedLocation.GetId() == nil || *createdNamedLocation.GetId() == "" {
+		if created.GetId() == nil || *created.GetId() == "" {
 			return backoff.Permanent(fmt.Errorf("created IPNamedLocation returned no ID"))
 		}
 
-		plan.ID = types.StringValue("/identity/conditionalAccess/namedLocations/" + *createdNamedLocation.GetId())
-
-		// Wait for 1 minutes to ensure the resource has been created before displaying 'Apply Successfully!' to prevent errors.
-		time.Sleep(1 * time.Minute)
-
+		plan.ID = types.StringValue(IDPath + *created.GetId())
+		time.Sleep(1 * time.Minute) // Azure propagation delay
 		return nil
 	}
 
-	reconnectBackoff := backoff.NewExponentialBackOff()
-	reconnectBackoff.MaxElapsedTime = 30 * time.Second
-	return backoff.Retry(createIPNamedLocation, reconnectBackoff)
+	// First attempt without retry
+	if err := createIPNamedLocation(); err == nil {
+		return nil
+	}
+
+	// Retry with exponential backoff
+	retryBackoff := backoff.NewExponentialBackOff()
+	retryBackoff.MaxElapsedTime = 30 * time.Second
+
+	return backoff.Retry(func() error {
+		// Calls the Microsoft Graph SDK to get a list of existing conditional access named locations.
+		existingLocations, err := d.client.Identity().
+			ConditionalAccess().
+			NamedLocations().
+			Get(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+
+		for _, location := range existingLocations.GetValue() {
+			if location.GetId() != nil && plan.ID.ValueString() == IDPath+*location.GetId() {
+				return nil // Found the location with matching ID; stop retrying.
+			}
+		}
+
+		// If no matching location is found, Calls createIPNamedLocation() to attempt to create the named location.
+		return createIPNamedLocation()
+	}, retryBackoff)
 }
 
 func (d *namedLocationResource) createCountryNamedLocation(plan *namedLocationResourceModel, resp *resource.CreateResponse) error {
 	createCountryNamedLocationRequest := graphmodels.NewCountryNamedLocation()
-
-	odataType := "#microsoft.graph.countryNamedLocation"
+	odataType := CountryOdataType
 	createCountryNamedLocationRequest.SetOdataType(&odataType)
-
-	// Set DisplayName and IsTrusted.
 	createCountryNamedLocationRequest.SetDisplayName(plan.DisplayName.ValueStringPointer())
 
 	if plan.Country.IncludeUnknownCountriesAndRegions.IsNull() || plan.Country.IncludeUnknownCountriesAndRegions.IsUnknown() {
-		trusted := false
-		createCountryNamedLocationRequest.SetIncludeUnknownCountriesAndRegions(&trusted)
+		return fmt.Errorf("The field 'IncludeUnknownCountriesAndRegions' must be set and cannot be null or unknown.")
 	} else {
 		createCountryNamedLocationRequest.SetIncludeUnknownCountriesAndRegions(plan.Country.IncludeUnknownCountriesAndRegions.ValueBoolPointer())
 	}
@@ -651,27 +682,11 @@ func (d *namedLocationResource) createCountryNamedLocation(plan *namedLocationRe
 	createCountryNamedLocationRequest.SetCountryLookupMethod(&method)
 
 	createCountryNamedLocation := func() error {
-		// Check if a named location with the same DisplayName already exists.
-		existingLocations, err := d.client.Identity().
-			ConditionalAccess().
-			NamedLocations().
-			Get(context.TODO(), nil)
-		if err != nil {
-			return err
-		}
-
-		for _, location := range existingLocations.GetValue() {
-			if location.GetDisplayName() != nil && *location.GetDisplayName() == *plan.DisplayName.ValueStringPointer() {
-				plan.ID = types.StringValue("/identity/conditionalAccess/namedLocations/" + *location.GetId())
-				return nil
-			}
-		}
-
-		createdNamedLocation, err := d.client.Identity().
+		created, err := d.client.Identity().
 			ConditionalAccess().
 			NamedLocations().
 			Post(
-				context.TODO(),
+				context.Background(),
 				createCountryNamedLocationRequest,
 				nil,
 			)
@@ -683,27 +698,48 @@ func (d *namedLocationResource) createCountryNamedLocation(plan *namedLocationRe
 					return backoff.Permanent(fmt.Errorf("failed to convert error code to int: %v", convErr))
 				}
 				if isAbleToRetry(codeInt) {
-					return err
+					return err // retryable
 				}
-				return backoff.Permanent(err)
+				return backoff.Permanent(err) // permanent
 			}
 			return err
 		}
 
-		if createdNamedLocation.GetId() == nil || *createdNamedLocation.GetId() == "" {
+		if created.GetId() == nil || *created.GetId() == "" {
 			return backoff.Permanent(fmt.Errorf("created CountryNamedLocation returned no ID"))
 		}
-		plan.ID = types.StringValue("/identity/conditionalAccess/namedLocations/" + *createdNamedLocation.GetId())
 
-		// Wait for 1 minutes to ensure the resource has been created before displaying 'Apply Successfully!' to prevent errors.
-		time.Sleep(1 * time.Minute)
-
+		plan.ID = types.StringValue(IDPath + *created.GetId())
+		time.Sleep(1 * time.Minute) // Azure propagation delay
 		return nil
 	}
 
-	reconnectBackoff := backoff.NewExponentialBackOff()
-	reconnectBackoff.MaxElapsedTime = 30 * time.Second
-	return backoff.Retry(createCountryNamedLocation, reconnectBackoff)
+	// First attempt without retry
+	if err := createCountryNamedLocation(); err == nil {
+		return nil
+	}
+
+	// Retry with exponential backoff
+	retryBackoff := backoff.NewExponentialBackOff()
+	retryBackoff.MaxElapsedTime = 30 * time.Second
+
+	return backoff.Retry(func() error {
+		existingLocations, err := d.client.Identity().
+			ConditionalAccess().
+			NamedLocations().
+			Get(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+
+		for _, location := range existingLocations.GetValue() {
+			if location.GetId() != nil && plan.ID.ValueString() == IDPath+*location.GetId() {
+				return nil // ID found, no need to retry
+			}
+		}
+
+		return createCountryNamedLocation()
+	}, retryBackoff)
 }
 
 func (d *namedLocationResource) updateIpNamedLocation(ctx context.Context, plan, state *namedLocationResourceModel) error {
@@ -714,7 +750,7 @@ func (d *namedLocationResource) updateIpNamedLocation(ctx context.Context, plan,
 	parts := strings.Split(fullID, "/")
 	namedLocationId := parts[len(parts)-1]
 
-	odataType := "#microsoft.graph.ipNamedLocation"
+	odataType := IPOdataType
 	updateIpNamedLocationRequest.SetOdataType(&odataType)
 
 	displayName := plan.DisplayName.ValueString()
@@ -744,7 +780,7 @@ func (d *namedLocationResource) updateIpNamedLocation(ctx context.Context, plan,
 			ipv4Range := graphmodels.NewIPv4CidrRange()
 			ipv4Range.SetCidrAddress(&cidr)
 
-			ipv4Type := "#microsoft.graph.iPv4CidrRange"
+			ipv4Type := IPV4Type
 			ipv4Range.SetOdataType(&ipv4Type)
 
 			ipRanges = append(ipRanges, ipv4Range)
@@ -752,7 +788,7 @@ func (d *namedLocationResource) updateIpNamedLocation(ctx context.Context, plan,
 			ipv6Range := graphmodels.NewIPv6CidrRange()
 			ipv6Range.SetCidrAddress(&cidr)
 
-			ipv6Type := "#microsoft.graph.iPv6CidrRange"
+			ipv6Type := IPV6Type
 			ipv6Range.SetOdataType(&ipv6Type)
 
 			ipRanges = append(ipRanges, ipv6Range)
@@ -769,10 +805,8 @@ func (d *namedLocationResource) updateIpNamedLocation(ctx context.Context, plan,
 			Patch(ctx, updateIpNamedLocationRequest, nil)
 
 		if err != nil {
-			log.Printf("Error during update: %v", err)
 			return err
 		}
-		log.Println("Named location updated successfully.")
 		return nil
 	}
 
@@ -789,18 +823,14 @@ func (d *namedLocationResource) updateCountryNamedLocation(ctx context.Context, 
 	parts := strings.Split(fullID, "/")
 	namedLocationId := parts[len(parts)-1]
 
-	odataType := "#microsoft.graph.countryNamedLocation"
+	odataType := CountryOdataType
 	updateCountryNamedLocationRequest.SetOdataType(&odataType)
 
 	displayName := plan.DisplayName.ValueString()
 	updateCountryNamedLocationRequest.SetDisplayName(&displayName)
 
-	if plan.Country.IncludeUnknownCountriesAndRegions.IsNull() || plan.Country.IncludeUnknownCountriesAndRegions.IsUnknown() {
-		trusted := false
-		updateCountryNamedLocationRequest.SetIncludeUnknownCountriesAndRegions(&trusted)
-	} else {
-		updateCountryNamedLocationRequest.SetIncludeUnknownCountriesAndRegions(plan.Country.IncludeUnknownCountriesAndRegions.ValueBoolPointer())
-	}
+	trusted := plan.Country.IncludeUnknownCountriesAndRegions.ValueBoolPointer()
+	updateCountryNamedLocationRequest.SetIncludeUnknownCountriesAndRegions(trusted)
 
 	var diags diag.Diagnostics
 	var method graphmodels.CountryLookupMethodType
@@ -846,10 +876,8 @@ func (d *namedLocationResource) updateCountryNamedLocation(ctx context.Context, 
 			Patch(ctx, updateCountryNamedLocationRequest, nil)
 
 		if err != nil {
-			log.Printf("Error during update: %v", err)
 			return err
 		}
-		log.Println("Named location updated successfully.")
 		return nil
 	}
 

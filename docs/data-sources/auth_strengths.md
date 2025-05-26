@@ -40,7 +40,7 @@ data "st-azuread_auth_strengths" "names" {
 - `ids` (List of String) The IDs of the authentication strength policy.
 - `names` (List of String) The names of the authentication strength policy.
 
-~> Only `ids` or `names` can be specified.
+~> Only one of `ids` or `names` can be specified.
 
 ### Read-Only
 

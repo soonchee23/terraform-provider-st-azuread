@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff"
 	graph "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 
-	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -30,9 +30,9 @@ type authStrengthsDataSource struct {
 }
 
 type authStrengthsDataSourceModel struct {
-	AuthStrIDs    types.List          `tfsdk:"ids"`
-	AuthStrNames  types.List          `tfsdk:"names"`
-	AuthStrengths []authStrengthModel `tfsdk:"auth_strengths"`
+	AuthStrIDs    types.List           `tfsdk:"ids"`
+	AuthStrNames  types.List           `tfsdk:"names"`
+	AuthStrengths []*authStrengthModel `tfsdk:"auth_strengths"`
 }
 
 type authStrengthModel struct {
@@ -90,9 +90,7 @@ func (d *authStrengthsDataSource) Configure(_ context.Context, req datasource.Co
 func (d *authStrengthsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var authStrengths models.AuthenticationStrengthPolicyCollectionResponseable
 	var err error
-	var plan, state authStrengthsDataSourceModel
-	var policyNames []attr.Value
-	var policyIDs []attr.Value
+	var plan authStrengthsDataSourceModel
 
 	diags := req.Config.Get(ctx, &plan)
 	resp.Diagnostics.Append(diags...)
@@ -113,6 +111,7 @@ func (d *authStrengthsDataSource) Read(ctx context.Context, req datasource.ReadR
 		authStrengths, err = d.client.Policies().AuthenticationStrengthPolicies().Get(context.Background(), nil)
 		return handleAPIError(err)
 	}
+
 	backoffPolicy := backoff.NewExponentialBackOff()
 	backoffPolicy.MaxElapsedTime = 30 * time.Second
 	if err = backoff.Retry(getAuthStrengths, backoffPolicy); err != nil {
@@ -124,24 +123,20 @@ func (d *authStrengthsDataSource) Read(ctx context.Context, req datasource.ReadR
 		return
 	}
 
-	nameSlice, err := listOfStringsToSlice(plan.AuthStrNames)
-	if err != nil {
-		resp.Diagnostics.AddError("[INPUT ERROR] Invalid Input", err.Error())
-		return
-	}
-	idSlice, err := listOfStringsToSlice(plan.AuthStrIDs)
-	if err != nil {
-		resp.Diagnostics.AddError("[INPUT ERROR] Invalid Input", err.Error())
-		return
+	nameSlice := make([]string, len(plan.AuthStrNames.Elements()))
+	for i, o := range plan.AuthStrNames.Elements() {
+		nameSlice[i] = strings.Trim(o.(types.String).ValueString(), "\"")
 	}
 
-	var authStrengthItems []authStrengthModel
+	idSlice := make([]string, len(plan.AuthStrIDs.Elements()))
+	for i, o := range plan.AuthStrIDs.Elements() {
+		idSlice[i] = strings.Trim(o.(types.String).ValueString(), "\"")
+	}
+
+	var authStrengthItems []*authStrengthModel
 	for _, policy := range authStrengths.GetValue() {
 		namePtr := policy.GetDisplayName()
 		idPtr := policy.GetId()
-		if namePtr == nil || idPtr == nil {
-			continue
-		}
 		name := *namePtr
 		id := *idPtr
 		fullID := fmt.Sprintf("/policies/authenticationStrengthPolicies/%s", id)
@@ -151,44 +146,13 @@ func (d *authStrengthsDataSource) Read(ctx context.Context, req datasource.ReadR
 			continue
 		}
 
-		authStrengthItems = append(authStrengthItems, authStrengthModel{
+		authStrengthItems = append(authStrengthItems, &authStrengthModel{
 			ID:   types.StringValue(fullID),
 			Name: types.StringValue(name),
 		})
-
-		policyIDs = append(policyIDs, types.StringValue(fullID))
-		policyNames = append(policyNames, types.StringValue(name))
 	}
 
-	state.AuthStrengths = authStrengthItems
-
-	state.AuthStrIDs, diags = types.ListValue(types.StringType, policyIDs)
+	plan.AuthStrengths = authStrengthItems
+	diags = resp.State.Set(ctx, &plan)
 	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	state.AuthStrNames, diags = types.ListValue(types.StringType, policyNames)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	diags = resp.State.Set(ctx, &state)
-	resp.Diagnostics.Append(diags...)
-}
-
-func listOfStringsToSlice(list types.List) ([]string, error) {
-	if list.IsNull() || list.IsUnknown() {
-		return []string{}, nil
-	}
-	result := make([]string, 0, len(list.Elements()))
-	for _, v := range list.Elements() {
-		if strVal, ok := v.(types.String); ok {
-			result = append(result, strVal.ValueString())
-		} else {
-			return nil, fmt.Errorf("expected types.String inside list, got %T", v)
-		}
-	}
-	return result, nil
 }
