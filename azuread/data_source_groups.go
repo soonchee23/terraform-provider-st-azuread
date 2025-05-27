@@ -59,7 +59,6 @@ func (d *groupsDataSource) Schema(_ context.Context, req datasource.SchemaReques
 			},
 			"display_name_prefix": schema.StringAttribute{
 				Optional:    true,
-				Computed:    true,
 				Description: "Prefix to match display names. Cannot be used with `display_names` or `return_all`.",
 			},
 			"ignore_missing": schema.BoolAttribute{
