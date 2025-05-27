@@ -32,7 +32,11 @@ Local Installation
       }
     }
 
-    provider "st-azuread" {}
+    provider "azuread" {
+      client_id     = "..."
+      client_secret = "..."
+      tenant_id     = "..."
+    }
     ```
 
 Why Custom Provider
