@@ -48,7 +48,7 @@ func (p *azureadProvider) Metadata(_ context.Context, _ provider.MetadataRequest
 // Schema defines the provider-level schema for configuration data.
 func (p *azureadProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "The AzureAD provider is used to interact with the many resources supported by Microsoft GraphAPI." +
+		Description: "The AzureAD provider is used to interact with the many resources supported by Microsoft GraphAPI. " +
 			"The provider needs to be configured with the proper credentials before it can be used.",
 		Attributes: map[string]schema.Attribute{
 			"tenant_id": schema.StringAttribute{
